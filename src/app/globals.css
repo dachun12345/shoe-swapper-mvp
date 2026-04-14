@@ -1,0 +1,107 @@
+@import "tailwindcss";
+
+:root {
+  /* Font stacks (避免构建期拉取 Google Fonts；上线后可替换为本地字体文件) */
+  --font-sans: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial,
+    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+  --font-display: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial,
+    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
+    "Courier New", monospace;
+
+  /* Core palette (tech-noir) */
+  --bg: #06070c;
+  --panel: rgba(255, 255, 255, 0.06);
+  --panel-2: rgba(255, 255, 255, 0.09);
+  --text: rgba(255, 255, 255, 0.92);
+  --muted: rgba(255, 255, 255, 0.62);
+  --border: rgba(255, 255, 255, 0.12);
+  --accent: #38bdf8; /* cyan */
+  --accent-2: #a78bfa; /* violet */
+  --danger: #fb7185;
+}
+
+@theme inline {
+  --color-background: var(--bg);
+  --color-foreground: var(--text);
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+}
+
+/* --- atmospheric background --- */
+.bg-tech {
+  position: relative;
+  background:
+    radial-gradient(800px 420px at 10% 5%, rgba(56, 189, 248, 0.18), transparent 60%),
+    radial-gradient(900px 520px at 95% 0%, rgba(167, 139, 250, 0.14), transparent 55%),
+    radial-gradient(900px 520px at 60% 120%, rgba(56, 189, 248, 0.10), transparent 55%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 24%),
+    var(--bg);
+}
+
+.bg-tech::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.6;
+  background-image:
+    linear-gradient(to right, rgba(255, 255, 255, 0.05) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.05) 1px, transparent 1px);
+  background-size: 64px 64px;
+  mask-image: radial-gradient(circle at 35% 12%, black 35%, transparent 70%);
+}
+
+.bg-tech::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(500px 220px at 50% 0%, rgba(56, 189, 248, 0.09), transparent 70%);
+  mix-blend-mode: screen;
+  opacity: 0.7;
+}
+
+/* --- UI utilities --- */
+.glass {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  box-shadow:
+    0 0 0 1px rgba(56, 189, 248, 0.06) inset,
+    0 30px 80px rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(14px);
+}
+
+.glass-2 {
+  background: var(--panel-2);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  backdrop-filter: blur(16px);
+}
+
+.neon-ring {
+  box-shadow:
+    0 0 0 1px rgba(56, 189, 248, 0.20) inset,
+    0 0 0 1px rgba(167, 139, 250, 0.12),
+    0 0 42px rgba(56, 189, 248, 0.12),
+    0 0 62px rgba(167, 139, 250, 0.08);
+}
+
+.text-muted {
+  color: var(--muted);
+}
+
+.font-display {
+  font-family: var(--font-display), var(--font-sans), ui-sans-serif, system-ui;
+  letter-spacing: 0.02em;
+}
+
+/* Selection canvas cursor */
+.crosshair {
+  cursor: crosshair;
+}

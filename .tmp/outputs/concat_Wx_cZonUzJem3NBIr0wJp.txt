@@ -1,0 +1,3 @@
+file '/sessions/69dd1c8d903adfe4edf496e9/workspace/shoe-swapper-mvp/.tmp/outputs/seg_V2FeLUENaIWXex8Q81RHA.mp4'
+file '/sessions/69dd1c8d903adfe4edf496e9/workspace/shoe-swapper-mvp/.tmp/outputs/seg__qR8VWN0Qho2qc0A7qj76.mp4'
+file '/sessions/69dd1c8d903adfe4edf496e9/workspace/shoe-swapper-mvp/.tmp/outputs/seg_EoP0XVh2IJodz3cWZ8WWi.mp4'
