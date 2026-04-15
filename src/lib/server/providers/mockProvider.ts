@@ -4,7 +4,17 @@ import { readFile } from "node:fs/promises";
 import sharp from "sharp";
 import { nanoid } from "nanoid";
 import { ensureDir, tmpDir } from "../fs";
-import type { ShoeSwapProvider, SwapImageArgs, SwapVideoArgs } from "./types";
+import type {
+  PromptFromImageArgs,
+  PromptFromImageResult,
+  PromptFromVideoArgs,
+  PromptFromVideoResult,
+  ShoeSwapProvider,
+  SwapImageArgs,
+  SwapVideoArgs,
+  TextToImageArgs,
+  TextToVideoArgs,
+} from "./types";
 
 function clamp01(n: number) {
   return Math.max(0, Math.min(1, n));
@@ -163,5 +173,25 @@ export const mockProvider: ShoeSwapProvider = {
     ]);
 
     return { outputPath: outPath, mimeType: "video/mp4" };
+  },
+
+  async promptFromVideo(_args: PromptFromVideoArgs): Promise<PromptFromVideoResult> {
+    void _args;
+    throw new Error("当前为演示版 mock-provider：不支持提示词生成");
+  },
+
+  async promptFromImage(_args: PromptFromImageArgs): Promise<PromptFromImageResult> {
+    void _args;
+    throw new Error("当前为演示版 mock-provider：不支持图生提示词");
+  },
+
+  async textToVideo(_args: TextToVideoArgs) {
+    void _args;
+    throw new Error("当前为演示版 mock-provider：不支持文生视频");
+  },
+
+  async textToImage(_args: TextToImageArgs) {
+    void _args;
+    throw new Error("当前为演示版 mock-provider：不支持文生图");
   },
 };

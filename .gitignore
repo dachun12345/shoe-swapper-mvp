@@ -17,6 +17,9 @@
 /.next/
 /out/
 
+# local tmp (generated outputs / uploads)
+.tmp/
+
 # production
 /build
 

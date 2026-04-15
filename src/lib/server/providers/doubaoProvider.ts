@@ -4,8 +4,18 @@ import { spawn } from "node:child_process";
 import sharp from "sharp";
 import { nanoid } from "nanoid";
 import { ensureDir, tmpDir } from "../fs";
-import type { ShoeSwapProvider, SwapImageArgs, SwapVideoArgs } from "./types";
-import type { NormalizedBox } from "../jobs/types";
+import type {
+  PromptFromImageArgs,
+  PromptFromImageResult,
+  PromptFromVideoArgs,
+  PromptFromVideoResult,
+  ShoeSwapProvider,
+  SwapImageArgs,
+  SwapVideoArgs,
+  TextToImageArgs,
+  TextToVideoArgs,
+} from "./types";
+import type { AspectRatio, NormalizedBox } from "../jobs/types";
 import { probeVideo } from "../videoProbe";
 
 const ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3";
@@ -36,6 +46,70 @@ function parseArkErrorCode(raw: string): string | undefined {
 
 function clamp01(n: number) {
   return Math.max(0, Math.min(1, n));
+}
+
+function parseAspectRatio(r?: AspectRatio): { w: number; h: number; ratio: number } | null {
+  if (!r) return null;
+  const m = /^(\d+):(\d+)$/.exec(r);
+  if (!m) return null;
+  const w = Number(m[1]);
+  const h = Number(m[2]);
+  if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) return null;
+  return { w, h, ratio: w / h };
+}
+
+function makeEven(n: number) {
+  const x = Math.round(n);
+  if (x <= 2) return 2;
+  return x % 2 === 0 ? x : x - 1;
+}
+
+async function cropImageToAspect(buf: Buffer, aspectRatio?: AspectRatio): Promise<Buffer> {
+  const ar = parseAspectRatio(aspectRatio);
+  if (!ar) return buf;
+  const img = sharp(buf);
+  const meta = await img.metadata();
+  if (!meta.width || !meta.height) return buf;
+  const w = meta.width;
+  const h = meta.height;
+  const cur = w / h;
+  const target = ar.ratio;
+  if (Math.abs(cur - target) < 0.001) return buf;
+  if (cur > target) {
+    const cropW = Math.max(1, Math.round(h * target));
+    const left = Math.max(0, Math.floor((w - cropW) / 2));
+    return await img.extract({ left, top: 0, width: cropW, height: h }).png().toBuffer();
+  } else {
+    const cropH = Math.max(1, Math.round(w / target));
+    const top = Math.max(0, Math.floor((h - cropH) / 2));
+    return await img.extract({ left: 0, top, width: w, height: cropH }).png().toBuffer();
+  }
+}
+
+async function cropVideoToAspect(args: {
+  inputPath: string;
+  outputPath: string;
+  preset: "720p" | "1080p";
+  aspectRatio?: AspectRatio;
+}) {
+  const ar = parseAspectRatio(args.aspectRatio);
+  if (!ar) return; // no-op
+  const longSide = args.preset === "1080p" ? 1920 : 1280;
+  const ratio = ar.ratio;
+  const outW = makeEven(ratio >= 1 ? longSide : longSide * ratio);
+  const outH = makeEven(ratio >= 1 ? longSide / ratio : longSide);
+  const vf = `crop=w='if(gt(a,${ratio}),ih*${ratio},iw)':h='if(gt(a,${ratio}),ih,iw/${ratio})',scale=${outW}:${outH}`;
+  await new Promise<void>((resolve, reject) => {
+    const p = spawn(
+      "ffmpeg",
+      ["-y", "-i", args.inputPath, "-vf", vf, "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast", "-crf", "18", args.outputPath],
+      { stdio: ["ignore", "pipe", "pipe"] }
+    );
+    let err = "";
+    p.stderr.on("data", (d: Buffer) => (err += d.toString()));
+    p.on("error", reject);
+    p.on("close", (code) => (code === 0 ? resolve() : reject(new Error(err || `ffmpeg exited ${code}`))));
+  });
 }
 
 function pxBox(imgW: number, imgH: number, box: { x: number; y: number; w: number; h: number }) {
@@ -144,8 +218,8 @@ async function downloadToFile(url: string, outPath: string) {
   await writeFile(outPath, Buffer.from(ab));
 }
 
-async function describeShoe(productImagePaths: string[]): Promise<string> {
-  const visionModel = process.env.DOUBAO_VISION_MODEL ?? "doubao-seed-1-6-vision-250815";
+async function describeShoe(productImagePaths: string[], visionModelOverride?: string): Promise<string> {
+  const visionModel = visionModelOverride ?? process.env.DOUBAO_VISION_MODEL ?? "doubao-seed-1-6-vision-250815";
   const imgs = await Promise.all(productImagePaths.map((p) => fileToDataUrl(p)));
 
   // 注意：该 vision 模型在你的账号下对 Responses API 可能无权限（你遇到过403）。
@@ -175,8 +249,8 @@ async function describeShoe(productImagePaths: string[]): Promise<string> {
   return txt || "一双与商品图一致的鞋子（外观、材质、颜色、logo与细节保持一致）";
 }
 
-async function detectShoes(imagePath: string): Promise<NormalizedBox[]> {
-  const visionModel = process.env.DOUBAO_VISION_MODEL ?? "doubao-seed-1-6-vision-250815";
+async function detectShoes(imagePath: string, visionModelOverride?: string): Promise<NormalizedBox[]> {
+  const visionModel = visionModelOverride ?? process.env.DOUBAO_VISION_MODEL ?? "doubao-seed-1-6-vision-250815";
   const img = await fileToDataUrl(imagePath);
 
   // 用 vision chat 直接输出 bbox JSON（归一化 0..1）
@@ -231,11 +305,13 @@ async function detectShoes(imagePath: string): Promise<NormalizedBox[]> {
 async function seedreamI2I({
   prompt,
   images,
+  seedreamModelOverride,
 }: {
   prompt: string;
   images: string | string[];
+  seedreamModelOverride?: string;
 }): Promise<string> {
-  const model = mustEnv("DOUBAO_SEEDREAM_MODEL");
+  const model = seedreamModelOverride ?? mustEnv("DOUBAO_SEEDREAM_MODEL");
   type ImgResp = { data: Array<{ url?: string; b64_json?: string }> };
   const r = await arkJson<ImgResp>("/images/generations", {
     model,
@@ -255,16 +331,16 @@ async function seedreamWholeImage({
   prompt,
   baseImagePath,
   productImagePaths,
+  seedreamModelOverride,
 }: {
   prompt: string;
   baseImagePath: string;
   productImagePaths: string[];
+  seedreamModelOverride?: string;
 }): Promise<Buffer> {
   const base = await fileToDataUrl(baseImagePath);
-  const p1 = await fileToDataUrl(productImagePaths[0]);
-  const p2 = await fileToDataUrl(productImagePaths[1]);
-  const p3 = await fileToDataUrl(productImagePaths[2]);
-  const url = await seedreamI2I({ prompt, images: [base, p1, p2, p3] });
+  const products = await Promise.all(productImagePaths.slice(0, 5).map((p) => fileToDataUrl(p)));
+  const url = await seedreamI2I({ prompt, images: [base, ...products], seedreamModelOverride });
   const resp = await fetch(url);
   if (!resp.ok) throw new Error(`下载生成结果失败(${resp.status})`);
   const ab = await resp.arrayBuffer();
@@ -275,12 +351,14 @@ async function seedanceI2V({
   prompt,
   firstFrame,
   resolution,
+  seedanceModelOverride,
 }: {
   prompt: string;
   firstFrame: string; // data url 或 http(s) url
   resolution: "720p" | "1080p";
+  seedanceModelOverride?: string;
 }): Promise<{ videoUrl: string; lastFrameUrl?: string }> {
-  const model = mustEnv("DOUBAO_SEEDANCE_MODEL");
+  const model = seedanceModelOverride ?? mustEnv("DOUBAO_SEEDANCE_MODEL");
 
   // Video Generation API：创建任务 → 轮询直到 succeeded → 拿 content.video_url
   type CreateTaskResp = { id: string };
@@ -332,7 +410,7 @@ export const doubaoProvider: ShoeSwapProvider = {
 
     // 背景编辑：走整图生成（硬替换），避免任何 feather / 拼接边
     if (args.intent === "background") {
-      const shoeDesc = await describeShoe(args.productImagePaths);
+      const shoeDesc = await describeShoe(args.productImagePaths, args.visionModel);
       const hasSelection = !!(args.selection && args.selection.length > 0);
       const coords = hasSelection
         ? `需要替换的鞋子区域（归一化bbox数组）：${JSON.stringify(args.selection)}`
@@ -357,20 +435,22 @@ export const doubaoProvider: ShoeSwapProvider = {
         prompt,
         baseImagePath: args.mimicImagePath,
         productImagePaths: args.productImagePaths,
+        seedreamModelOverride: args.seedreamModel,
       });
-      await sharp(buf).png().toFile(outPath);
+      const cropped = await cropImageToAspect(buf, args.aspectRatio);
+      await sharp(cropped).png().toFile(outPath);
       return { outputPath: outPath, mimeType: "image/png" };
     }
 
     // 1) 解析框选：框选多少个鞋，替换多少双；不框选则自动检测全部鞋子
     let boxes: NormalizedBox[] = (args.selection ?? []).filter(Boolean);
     if (boxes.length === 0) {
-      boxes = await detectShoes(args.mimicImagePath);
+      boxes = await detectShoes(args.mimicImagePath, args.visionModel);
     }
     if (boxes.length === 0) throw new Error("未检测到鞋子区域，请手动框选（尽量覆盖鞋子+阴影）");
 
     // 2) 用视觉模型把“鞋子外观”抽成文字（让生成更贴近商品）
-    const shoeDesc = await describeShoe(args.productImagePaths);
+    const shoeDesc = await describeShoe(args.productImagePaths, args.visionModel);
     const product1 = await fileToDataUrl(args.productImagePaths[0]);
     const product2 = await fileToDataUrl(args.productImagePaths[1]);
     const product3 = await fileToDataUrl(args.productImagePaths[2]);
@@ -414,7 +494,11 @@ export const doubaoProvider: ShoeSwapProvider = {
         .filter(Boolean)
         .join("\n");
 
-      const url = await seedreamI2I({ prompt, images: [cropDataUrl, product1, product2, product3] });
+      const url = await seedreamI2I({
+        prompt,
+        images: [cropDataUrl, product1, product2, product3],
+        seedreamModelOverride: args.seedreamModel,
+      });
 
       const patchPath = path.join(outDir, `patch_${nanoid()}.png`);
       await downloadToFile(url, patchPath);
@@ -437,6 +521,14 @@ export const doubaoProvider: ShoeSwapProvider = {
       currentPath = nextPath;
     }
 
+    // 最后按目标比例做一次裁切（可选）
+    if (args.aspectRatio) {
+      const finalBuf = await sharp(currentPath).png().toBuffer();
+      const cropped = await cropImageToAspect(finalBuf, args.aspectRatio);
+      const outPath = path.join(outDir, `image_ar_${nanoid()}.png`);
+      await writeFile(outPath, cropped);
+      return { outputPath: outPath, mimeType: "image/png" };
+    }
     return { outputPath: currentPath, mimeType: "image/png" };
   },
 
@@ -461,7 +553,7 @@ export const doubaoProvider: ShoeSwapProvider = {
     });
 
     // 先把首帧换鞋（同图多框选：替换多双；不框选则自动检测）
-    const shoeDesc = await describeShoe(args.productImagePaths);
+    const shoeDesc = await describeShoe(args.productImagePaths, args.visionModel);
     const frameMeta = await sharp(styleFramePath).metadata();
     if (!frameMeta.width || !frameMeta.height) throw new Error("无法读取视频首帧尺寸");
     const product1 = await fileToDataUrl(args.productImagePaths[0]);
@@ -492,12 +584,13 @@ export const doubaoProvider: ShoeSwapProvider = {
         prompt,
         baseImagePath: styleFramePath,
         productImagePaths: args.productImagePaths,
+        seedreamModelOverride: args.seedreamModel,
       });
       swappedFramePath = path.join(outDir, `first_frame_bg_${nanoid()}.png`);
       await sharp(buf).png().toFile(swappedFramePath);
     } else {
       let boxes: NormalizedBox[] = (args.selection ?? []).filter(Boolean);
-      if (boxes.length === 0) boxes = await detectShoes(styleFramePath);
+      if (boxes.length === 0) boxes = await detectShoes(styleFramePath, args.visionModel);
       if (boxes.length === 0) throw new Error("未检测到鞋子区域，请手动框选（尽量覆盖鞋子+阴影）");
 
       for (const rawBox of boxes.map((b) => expandBox(b, 0.06))) {
@@ -530,7 +623,11 @@ export const doubaoProvider: ShoeSwapProvider = {
           .filter(Boolean)
           .join("\n");
 
-        const patchUrl = await seedreamI2I({ prompt: framePrompt, images: [cropDataUrl, product1, product2, product3] });
+        const patchUrl = await seedreamI2I({
+          prompt: framePrompt,
+          images: [cropDataUrl, product1, product2, product3],
+          seedreamModelOverride: args.seedreamModel,
+        });
         const patchPath = path.join(outDir, `frame_patch_${nanoid()}.png`);
         await downloadToFile(patchUrl, patchPath);
         const resized = await sharp(patchPath).resize(crop.width, crop.height, { fit: "fill" }).png().toBuffer();
@@ -577,6 +674,7 @@ export const doubaoProvider: ShoeSwapProvider = {
         prompt,
         firstFrame: nextFirstFrame,
         resolution,
+        seedanceModelOverride: args.seedanceModel,
       });
       const segPath = path.join(outDir, `seg_${nanoid()}.mp4`);
       await downloadToFile(videoUrl, segPath);
@@ -620,5 +718,305 @@ export const doubaoProvider: ShoeSwapProvider = {
     });
 
     return { outputPath: outPath, mimeType: "video/mp4" };
+  },
+
+  async promptFromVideo(args: PromptFromVideoArgs): Promise<PromptFromVideoResult> {
+    const outDir = tmpDir("prompt");
+    await ensureDir(outDir);
+    const meta = await probeVideo(args.promptVideoPath);
+    const duration = Math.max(1, Math.round(meta.durationSec ?? 10));
+
+    // 取关键帧 + 百分比帧（最多12张）
+    const times = [0, 1, 3, Math.max(0, duration - 1), duration * 0.2, duration * 0.4, duration * 0.6, duration * 0.8]
+      .map((t) => Math.max(0, Math.min(duration - 0.2, t)))
+      .map((t) => Math.round(t * 10) / 10);
+    const uniqueTimes = Array.from(new Set(times)).slice(0, 12);
+
+    const framePaths: string[] = [];
+    for (let i = 0; i < uniqueTimes.length; i++) {
+      const t = uniqueTimes[i];
+      const fp = path.join(outDir, `f_${i}_${String(t).replace(".", "_")}.png`);
+      framePaths.push(fp);
+      await new Promise<void>((resolve, reject) => {
+        const p = spawn("ffmpeg", ["-y", "-ss", String(t), "-i", args.promptVideoPath, "-frames:v", "1", fp], {
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+        let err = "";
+        p.stderr.on("data", (d: Buffer) => (err += d.toString()));
+        p.on("error", reject);
+        p.on("close", (code) => (code === 0 ? resolve() : reject(new Error(err || `ffmpeg exited ${code}`))));
+      });
+    }
+
+    const visionModel = args.visionModel ?? process.env.DOUBAO_VISION_MODEL ?? "doubao-1-5-vision-pro-32k-250115";
+    const imgs = await Promise.all(framePaths.map((p) => fileToDataUrl(p, "image/png")));
+
+    type ChatResp = { choices?: Array<{ message?: { content?: string } }> };
+    const payload = {
+      model: visionModel,
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text:
+                "你是短视频导演与提示词工程师。请根据接下来多张视频抽帧，还原一个可直接用于 Seedance 生成视频的高质量提示词。\n" +
+                `原视频时长约 ${duration}s；请确保输出的提示词/分镜/节奏建议均以生成同等时长视频为目标。\n` +
+                "要求输出严格JSON（不要任何多余文字），字段如下：\n" +
+                "{\n" +
+                '  "style": "画面风格/色调/质感",\n' +
+                '  "camera": "运镜与景别（推进/环绕/手持/稳定器等）",\n' +
+                '  "rhythm": "节奏与镜头变化（快慢/切换频率）",\n' +
+                '  "shotlist": [{"t":"0s","desc":"..."},{"t":"1s","desc":"..."},{"t":"3s","desc":"..."},{"t":"end","desc":"..."}],\n' +
+                `  "duration_suggestion": ${duration},\n` +
+                '  "bgm_suggestion": {"genre":"", "mood":"", "bpm":"", "instruments":""},\n' +
+                `  "seedance_prompt": "最终可复制的Seedance提示词（中文，包含运镜/节奏/无声要求，明确生成时长约${duration}s，并考虑BGM风格让画面节奏匹配）",\n` +
+                '  "negative": "不希望出现的元素（字幕/水印/音轨等）"\n' +
+                "}\n" +
+                (args.bgm?.trim() ? `用户提供的BGM/音乐偏好：${args.bgm.trim()}\n` : ""),
+            },
+            ...imgs.map((u) => ({ type: "image_url", image_url: { url: u } })),
+          ],
+        },
+      ],
+    };
+
+    const r = await arkJson<ChatResp>("/chat/completions", payload);
+    const raw = r.choices?.[0]?.message?.content?.trim() ?? "{}";
+    let parsed: Record<string, unknown> = {};
+    try {
+      const v: unknown = JSON.parse(raw);
+      if (v && typeof v === "object" && !Array.isArray(v)) {
+        parsed = v as Record<string, unknown>;
+      } else {
+        parsed = { seedance_prompt: raw };
+      }
+    } catch {
+      parsed = { seedance_prompt: raw };
+    }
+
+    const seedancePrompt = typeof parsed.seedance_prompt === "string" ? parsed.seedance_prompt : raw;
+    const bgmSuggestion = parsed.bgm_suggestion;
+    const shotlist = parsed.shotlist;
+    const durationSuggestion =
+      typeof parsed.duration_suggestion === "number" && Number.isFinite(parsed.duration_suggestion)
+        ? Math.max(1, Math.round(parsed.duration_suggestion))
+        : duration;
+    const camera = typeof parsed.camera === "string" ? parsed.camera : "—";
+    const rhythm = typeof parsed.rhythm === "string" ? parsed.rhythm : "—";
+
+    const outputText = [
+      `【建议时长】${durationSuggestion}s（与原视频一致）`,
+      "",
+      "【Seedance Prompt】",
+      String(seedancePrompt),
+      "",
+      "【BGM建议】",
+      bgmSuggestion ? JSON.stringify(bgmSuggestion, null, 2) : "—",
+      "",
+      "【分镜】",
+      Array.isArray(shotlist)
+        ? shotlist
+            .map((s: unknown) => {
+              if (!s || typeof s !== "object") return "";
+              const o = s as Record<string, unknown>;
+              const t = typeof o.t === "string" ? o.t : "";
+              const desc = typeof o.desc === "string" ? o.desc : "";
+              return `${t}: ${desc}`.trim();
+            })
+            .filter(Boolean)
+            .join("\n")
+        : "—",
+      "",
+      "【运镜】",
+      String(camera),
+      "",
+      "【节奏】",
+      String(rhythm),
+    ].join("\n");
+
+    return { outputText, outputData: parsed };
+  },
+
+  async promptFromImage(args: PromptFromImageArgs): Promise<PromptFromImageResult> {
+    const visionModel = args.visionModel ?? process.env.DOUBAO_VISION_MODEL ?? "doubao-1-5-vision-pro-32k-250115";
+    const imgs = await Promise.all(args.promptImagePaths.slice(0, 5).map((p) => fileToDataUrl(p)));
+    const extra = args.extra?.trim();
+
+    type ChatResp = { choices?: Array<{ message?: { content?: string } }> };
+    const payload = {
+      model: visionModel,
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text:
+                "你是电商摄影总监与提示词工程师。请根据接下来多张参考图片（同一主题/同一商品的不同角度），生成一个可直接用于“图片生成模型（Seedream）”的高质量【图片提示词】。\n" +
+                "要求输出严格JSON（不要任何多余文字），字段如下：\n" +
+                "{\n" +
+                '  "style": "画面风格/色调/质感（电商/广告/棚拍等）",\n' +
+                '  "composition": "构图/主体占比/视角/背景描述",\n' +
+                '  "lighting": "光线（柔光/硬光/轮廓光/高光控制等）",\n' +
+                '  "seedream_prompt": "最终可复制的图片提示词（中文，面向Seedream；强调主体一致、细节清晰、材质真实）",\n' +
+                '  "negative": "不希望出现的元素（字幕/水印/多余logo/变形/额外鞋款等）"\n' +
+                "}\n" +
+                (extra ? `额外需求（用户填写）：${extra}\n` : ""),
+            },
+            ...imgs.map((u) => ({ type: "image_url", image_url: { url: u } })),
+          ],
+        },
+      ],
+    };
+
+    const r = await arkJson<ChatResp>("/chat/completions", payload);
+    const raw = r.choices?.[0]?.message?.content?.trim() ?? "{}";
+    let parsed: Record<string, unknown> = {};
+    try {
+      const v: unknown = JSON.parse(raw);
+      if (v && typeof v === "object" && !Array.isArray(v)) parsed = v as Record<string, unknown>;
+      else parsed = { seedance_prompt: raw };
+    } catch {
+      parsed = { seedance_prompt: raw };
+    }
+
+    const style = typeof parsed.style === "string" ? parsed.style : "—";
+    const composition = typeof parsed.composition === "string" ? parsed.composition : "—";
+    const lighting = typeof parsed.lighting === "string" ? parsed.lighting : "—";
+    const seedreamPrompt = typeof parsed.seedream_prompt === "string" ? parsed.seedream_prompt : raw;
+    const negative = typeof parsed.negative === "string" ? parsed.negative : "—";
+
+    const outputText = [
+      "【Seedream 图片提示词】",
+      String(seedreamPrompt),
+      "",
+      "【风格】",
+      String(style),
+      "",
+      "【构图】",
+      String(composition),
+      "",
+      "【灯光】",
+      String(lighting),
+      "",
+      "【负面词】",
+      String(negative),
+    ].join("\n");
+
+    return { outputText, outputData: parsed };
+  },
+
+  async textToVideo(args: TextToVideoArgs) {
+    const outDir = tmpDir("outputs");
+    await ensureDir(outDir);
+    const outPath = path.join(outDir, `t2v_${nanoid()}.mp4`);
+
+    const firstFrameDataUrl = await fileToDataUrl(args.imagePaths[0]);
+    const resolution = args.preset === "1080p" ? "1080p" : "720p";
+    const targetSec = args.durationSec;
+
+    const prompt = [
+      args.prompt.trim(),
+      "要求：无声视频，不要背景音乐（BGM），不要任何音轨；不要字幕、水印、logo。",
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+    const segments: string[] = [];
+    let acc = 0;
+    let nextFirstFrame: string = firstFrameDataUrl;
+    const maxSegments = 10;
+
+    for (let i = 0; i < maxSegments && acc < targetSec; i++) {
+      const { videoUrl, lastFrameUrl } = await seedanceI2V({
+        prompt,
+        firstFrame: nextFirstFrame,
+        resolution,
+        seedanceModelOverride: args.seedanceModel,
+      });
+      const segPath = path.join(outDir, `seg_${nanoid()}.mp4`);
+      await downloadToFile(videoUrl, segPath);
+      segments.push(segPath);
+
+      const meta = await probeVideo(segPath);
+      const d = meta.durationSec ? Math.max(0.1, meta.durationSec) : 5;
+      acc += d;
+
+      if (lastFrameUrl) nextFirstFrame = lastFrameUrl;
+    }
+
+    // concat + trim + remove audio
+    const listPath = path.join(outDir, `concat_${nanoid()}.txt`);
+    const list = segments.map((p) => `file '${p.replace(/'/g, "'\\''")}'`).join("\n");
+    await writeFile(listPath, list, "utf-8");
+
+    const tmpConcat = path.join(outDir, `concat_${nanoid()}.mp4`);
+    await new Promise<void>((resolve, reject) => {
+      const p = spawn(
+        "ffmpeg",
+        ["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", tmpConcat],
+        { stdio: ["ignore", "pipe", "pipe"] }
+      );
+      let err = "";
+      p.stderr.on("data", (d: Buffer) => (err += d.toString()));
+      p.on("error", reject);
+      p.on("close", (code) => (code === 0 ? resolve() : reject(new Error(err || `ffmpeg exited ${code}`))));
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      const p = spawn(
+        "ffmpeg",
+        ["-y", "-i", tmpConcat, "-t", String(targetSec), "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", outPath],
+        { stdio: ["ignore", "pipe", "pipe"] }
+      );
+      let err = "";
+      p.stderr.on("data", (d: Buffer) => (err += d.toString()));
+      p.on("error", reject);
+      p.on("close", (code) => (code === 0 ? resolve() : reject(new Error(err || `ffmpeg exited ${code}`))));
+    });
+
+    // 按目标比例裁切（可选）
+    if (args.aspectRatio) {
+      const croppedPath = path.join(outDir, `t2v_ar_${nanoid()}.mp4`);
+      await cropVideoToAspect({
+        inputPath: outPath,
+        outputPath: croppedPath,
+        preset: args.preset === "1080p" ? "1080p" : "720p",
+        aspectRatio: args.aspectRatio,
+      });
+      return { outputPath: croppedPath, mimeType: "video/mp4" };
+    }
+
+    return { outputPath: outPath, mimeType: "video/mp4" };
+  },
+
+  async textToImage(args: TextToImageArgs) {
+    const outDir = tmpDir("outputs");
+    await ensureDir(outDir);
+    const outPath = path.join(outDir, `t2i_${nanoid()}.png`);
+
+    const refImgs = await Promise.all(args.imagePaths.slice(0, 5).map((p) => fileToDataUrl(p)));
+    const prompt = [
+      args.prompt.trim(),
+      "要求：不要字幕、水印、logo；画面干净、商品质感清晰。",
+      "参考图为同一款鞋/同一主题的多角度，请尽量保持鞋子的外观细节一致。",
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+    const url = await seedreamI2I({
+      prompt,
+      images: refImgs,
+      seedreamModelOverride: args.seedreamModel,
+    });
+
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error(`下载生成结果失败(${resp.status})`);
+    const ab = await resp.arrayBuffer();
+    const cropped = await cropImageToAspect(Buffer.from(ab), args.aspectRatio);
+    await writeFile(outPath, cropped);
+    return { outputPath: outPath, mimeType: "image/png" };
   },
 };

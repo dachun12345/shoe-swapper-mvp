@@ -60,6 +60,22 @@ export function Textarea({
   );
 }
 
+export function Select({
+  className,
+  ...props
+}: React.SelectHTMLAttributes<HTMLSelectElement>) {
+  return (
+    <select
+      className={cn(
+        "h-11 w-full rounded-xl border border-white/12 bg-white/5 px-4 text-sm text-white outline-none",
+        "focus:border-cyan-300/40 focus:ring-2 focus:ring-cyan-300/10",
+        className
+      )}
+      {...props}
+    />
+  );
+}
+
 export function Card({
   className,
   ...props

@@ -46,6 +46,9 @@ async function processJob(jobId: string) {
         selection: input.selection ?? null,
         extra: input.extra,
         intent: input.intent,
+        aspectRatio: input.aspectRatio,
+        visionModel: input.visionModel,
+        seedreamModel: input.seedreamModel,
       });
       setJob(jobId, {
         status: "succeeded",
@@ -66,6 +69,80 @@ async function processJob(jobId: string) {
         preset: input.videoPreset ?? "720p",
         intent: input.intent,
         durationSec: input.videoDurationSec,
+        aspectRatio: input.aspectRatio,
+        visionModel: input.visionModel,
+        seedreamModel: input.seedreamModel,
+        seedanceModel: input.seedanceModel,
+      });
+      setJob(jobId, {
+        status: "succeeded",
+        progress: 100,
+        outputPath: res.outputPath,
+        outputMimeType: res.mimeType,
+      });
+      return;
+    }
+
+    if (input.mode === "prompt") {
+      setJob(jobId, { progress: 25 });
+      const res = await provider.promptFromVideo({
+        promptVideoPath: input.promptVideoPath,
+        bgm: input.bgm,
+        visionModel: input.visionModel,
+      });
+      setJob(jobId, {
+        status: "succeeded",
+        progress: 100,
+        outputText: res.outputText,
+        outputData: res.outputData,
+        outputMimeType: "text/plain",
+      });
+      return;
+    }
+
+    if (input.mode === "prompt_image") {
+      setJob(jobId, { progress: 25 });
+      const res = await provider.promptFromImage({
+        promptImagePaths: input.promptImagePaths,
+        extra: input.extra,
+        visionModel: input.visionModel,
+      });
+      setJob(jobId, {
+        status: "succeeded",
+        progress: 100,
+        outputText: res.outputText,
+        outputData: res.outputData,
+        outputMimeType: "text/plain",
+      });
+      return;
+    }
+
+    if (input.mode === "t2v") {
+      setJob(jobId, { progress: 25 });
+      const res = await provider.textToVideo({
+        prompt: input.t2vPrompt,
+        imagePaths: input.t2vImagePaths,
+        preset: input.videoPreset,
+        durationSec: input.videoDurationSec,
+        aspectRatio: input.aspectRatio,
+        seedanceModel: input.seedanceModel,
+      });
+      setJob(jobId, {
+        status: "succeeded",
+        progress: 100,
+        outputPath: res.outputPath,
+        outputMimeType: res.mimeType,
+      });
+      return;
+    }
+
+    if (input.mode === "t2i") {
+      setJob(jobId, { progress: 25 });
+      const res = await provider.textToImage({
+        prompt: input.t2iPrompt,
+        imagePaths: input.t2iImagePaths,
+        aspectRatio: input.aspectRatio,
+        seedreamModel: input.seedreamModel,
       });
       setJob(jobId, {
         status: "succeeded",
